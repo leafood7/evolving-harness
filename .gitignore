@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+.harness/
+*.sqlite3*
+*.egg-info/
+build/
+dist/
+.env
+harness.local.toml
+
+# Private local state and generated artifacts
+.env.*
+!.env.example
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+outputs/
+work/

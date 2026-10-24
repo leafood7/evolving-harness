@@ -1,0 +1,4 @@
+# Copy to harness.local.toml, then configure an existing Node.js >=22.19.
+# Single-quoted TOML strings preserve Windows backslashes.
+[pi]
+node = 'C:\Program Files\nodejs\node.exe'

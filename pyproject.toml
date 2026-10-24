@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolving-harness"
+version = "0.2.0"
+description = "A user-scoped, recursively improvable Python harness for Pi RPC"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+evolving-harness = "evolving_harness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["evolving_harness*"]
+
+[tool.setuptools.package-data]
+evolving_harness = ["resources/*.md", "resources/*.json"]
