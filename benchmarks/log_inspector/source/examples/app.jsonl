@@ -1,0 +1,5 @@
+{"timestamp": "2026-10-24T09:00:00+08:00", "level": "INFO", "message": "服务启动"}
+{"timestamp": "2026-10-24T09:01:00+08:00", "level": "DEBUG", "message": "加载配置"}
+{"timestamp": "2026-10-24T09:02:00+08:00", "level": "WARN", "message": "请求耗时较长"}
+{"timestamp": "2026-10-24T09:03:00+08:00", "level": "ERROR", "message": "数据库连接超时"}
+{"timestamp": "2026-10-24T01:04:00Z", "level": "INFO", "message": "重试成功"}

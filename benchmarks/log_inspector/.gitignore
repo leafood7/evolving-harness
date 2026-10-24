@@ -1,0 +1,2 @@
+# This checked-in fixture contains synthetic example data, not production logs.
+!source/examples/*.log
