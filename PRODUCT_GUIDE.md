@@ -1,5 +1,9 @@
 # Evolving Harness：本地可用版
 
+## 通用任务评测入口
+
+`/harness eval prepare 配置路径` 冻结源码、任务、两版 Skill 和独立检查；`/harness eval run` 展示载荷并确认整批真实执行；`/harness eval status` 或 `report` 查看统一 HTML / JSON 报告。配置1—5个 Python 任务，可比较未启用候选与旧版本，不自动激活。详细协议、限制和零模型演示见 [评测使用说明](examples/evaluation/README.md)。
+
 启动与环境配置见 [README](README.md)。沿用原生 Pi 界面，独立 Python 控制层，不修改 Pi 源码。已有数据库可继续使用；新增组件表自动创建，不替换已有记忆或策略。
 
 ## 先看这两个入口

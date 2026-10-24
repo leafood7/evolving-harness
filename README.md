@@ -52,6 +52,12 @@ python -m evolving_harness --project my-project native --workspace 'D:\path\to\p
 
 完整命令、作用范围及限制见 [产品使用说明](PRODUCT_GUIDE.md)，或 `/harness help`。
 
+## 通用任务评测
+
+新增 `/harness eval prepare 配置路径`、`/harness eval run`、`/harness eval report`。支持配置1—5个 Python 编程任务，对照指定旧版/候选 Skill，冻结起始源码和独立验收，汇总正确性、工具调用、耗时及可用费用，输出 HTML / JSON 报告。不会自动晋升候选，真实请求须先确认。
+
+可先运行零模型演示：`python examples/evaluation/offline_demo.py --output .harness/eval-demo-001`。配置协议和真实任务操作见 [评测使用说明](examples/evaluation/README.md)。这是可配置的 Python 任务入口，不再依赖日志工具；不含模型裁判或 OS 沙盒。
+
 ## 实验与边界
 
 提供记忆故障模拟、跨任务实验、复盘策略基准和日志项目 Skill 对照。它们验证不同层次，不能相互替代。

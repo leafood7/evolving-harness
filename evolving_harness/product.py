@@ -8,6 +8,21 @@ from .runtime import redact
 def handle(store,owner,project,request):
     op=request['operation'];scope='@user' if request.get('user_scope') else project
     registry=Components(store,owner,scope)
+    if op.startswith('product-eval-'):
+        from .task_eval import TaskEvaluation
+        evaluation=TaskEvaluation(store,owner,project)
+        if op=='product-eval-prepare':return evaluation.prepare(request['workspace'],request['manifest'])
+        if op=='product-eval-preview':return evaluation.preview(request.get('suite_id'))
+        if op in {'product-eval-status','product-eval-report'}:return evaluation.report(request.get('suite_id'))
+        if op=='product-eval-run-case':
+            if request.get('confirmed') is not True or not request.get('provider') or not request.get('model'):
+                raise ValueError('Confirm evaluator code, outbound source, selected model and real shell access')
+            if __import__('os').environ.get('EH_ALLOW_WRITE')!='1':
+                raise ValueError('Restart native with --allow-write for real task evaluation')
+            import asyncio
+            return asyncio.run(evaluation.run_case(request['suite_id'],request['pair_id'],request['packet_hash'],
+                request['pi_root'],request['provider'],request['model']))
+        raise ValueError('Unknown evaluation operation')
     if op.startswith('product-skill-compare-'):
         from .skill_compare import SkillCompare
         trial=SkillCompare(store,owner,project)

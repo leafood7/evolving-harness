@@ -55,7 +55,21 @@ export default function evolving(pi: ExtensionAPI) {
   const show = (ctx: ExtensionContext, title: string, value: unknown) => {
     const v: any = value;
     let lines: string[];
-    if (v.skill_comparison_preview) {
+    if (v.evaluation_preview) {
+      const p=v.evaluation_preview;
+      lines=[`${p.name} · ${p.id} · ${p.pairs.length} 个任务`,
+        `基线 ${p.baseline ? p.baseline.name+' v'+p.baseline.version : '不注入Skill'} → 候选 ${p.candidate.name} v${p.candidate.version}`,
+        ...p.pairs.map((x:any)=>`${x.evaluation_pair_preview.case_id}: ${x.evaluation_pair_preview.status} · ${Object.keys(x.evaluation_pair_preview.files).length} 个源文件`),
+        '完整载荷包含源码、指令、记忆、Skill及可信Python验收代码；先检查报告。准备不会调用模型。'];
+    } else if (v.evaluation_report) {
+      const p=v.evaluation_report;
+      const decisions:any={pending:'待完成',keep_current:'保留当前，未证明收益',do_not_promote:'拒绝晋升',insufficient_evidence:'证据不足',review_candidate:'存在改善，待人工复核'};
+      const outcomes:any={ready:'待运行',running:'运行中',tie_on_this_task:'本任务持平',improved_on_this_task:'本任务改善',worse_on_this_task:'本任务退步',both_failed:'两组未通过',inconclusive:'无结论'};
+      lines=[`${p.name} · ${p.complete ? '已结束' : '未全部结束'} · ${decisions[p.recommendation] || p.recommendation}`,
+        ...p.cases.map((c:any)=>`${c.case_id}: ${outcomes[c.outcome] || c.outcome} · 基线 ${c.arms.baseline?.reference.status || '未运行'} / 候选 ${c.arms.candidate?.reference.status || '未运行'}`),
+        `HTML报告：${v.report_html}`,`JSON证据：${v.report_json}`,
+        '失败和平局保留；不自动重试、不自动启用，小样本不证明泛化收益。'];
+    } else if (v.skill_comparison_preview) {
       const p=v.skill_comparison_preview;
       lines=[`对照 ${p.id} · 固定同一个模块拆分任务`,
         `Skill ${p.skill.name} v${p.skill.version} · 源文件 ${Object.keys(p.files).length} 个`,
@@ -269,7 +283,28 @@ export default function evolving(pi: ExtensionAPI) {
     description: "状态；memory-review [ID] 记忆效果预览；task/test；feedback/audit",
     handler: async (args, ctx) => {
       args = args.trim();
-      if (args === 'skill-compare' || args === 'skill-compare status') {
+      if (args.startsWith('eval ') || args === 'eval') {
+        if (!ctx.isIdle()) {ctx.ui.notify('请等当前任务结束','warning');return;}
+        if (args.startsWith('eval prepare ')) {
+          show(ctx,'通用评测完整载荷',await call({operation:'product-eval-prepare',workspace:ctx.cwd,manifest:args.slice('eval prepare '.length).trim()}));
+        } else if (args==='eval status' || args==='eval report') {
+          show(ctx,'通用评测报告',await call({operation:'product-eval-report'}));
+        } else if (args==='eval run') {
+          if (!ctx.model) {ctx.ui.notify('请先配置模型','warning');return;}
+          const selected={provider:ctx.model.provider,model:ctx.model.id};
+          const preview=await call({operation:'product-eval-preview'});show(ctx,'确认前检查完整评测载荷',preview);
+          const pending=preview.evaluation_preview.pairs.filter((p:any)=>p.evaluation_pair_preview.status==='ready');
+          if (!pending.length) {show(ctx,'已有评测报告',await call({operation:'product-eval-report'}));return;}
+          if (!await ctx.ui.confirm('执行通用任务评测',
+            `向 ${selected.provider}/${selected.model} 发送报告中的任务源码、相同偏好/记忆及两版Skill。待执行 ${pending.length} 个任务，每任务两组独立会话，最多约5分钟，允许多轮模型和工具调用。固定Python验收代码也会执行。真实Shell运行用户权限，不是OS沙盒。请先检查完整载荷，确认整批执行？`)) return;
+          for (const p of pending) {
+            ctx.ui.notify(`正在评测 ${p.evaluation_pair_preview.case_id}；失败与平局均保存。`,'info');
+            show(ctx,'任务评测进度',await call({operation:'product-eval-run-case',suite_id:preview.evaluation_preview.id,
+              pair_id:p.evaluation_pair_preview.id,packet_hash:p.packet_hash,confirmed:true,
+              pi_root:process.env.EH_PI_ROOT,...selected}));
+          }
+        } else ctx.ui.notify('eval prepare 相对配置路径 / eval run / eval status / eval report','info');
+      } else if (args === 'skill-compare' || args === 'skill-compare status') {
         if (!ctx.isIdle()) {ctx.ui.notify('请等当前任务结束','warning');return;}
         if (args.endsWith('status')) {show(ctx,'Skill对照记录',await call({operation:'product-skill-compare-status'}));return;}
         if (!ctx.model) {ctx.ui.notify('请先配置模型','warning');return;}
@@ -323,6 +358,7 @@ export default function evolving(pi: ExtensionAPI) {
       } else if (args === 'help') {
         ctx.ui.setWidget('evolving-harness',['Harness 功能入口',
           'improve：整批采集/候选/评估，只确认一次；improve status：跟踪后续版本使用',
+          'eval prepare 配置路径 / eval run / eval status / eval report：通用Python任务对照',
           'center：活动版本与历史；memory-review：记忆评审/候选',
           'strategy feedback 检查名 理由 / strategy propose：策略自身改进候选',
           'package edit 名称：JSON编辑（reviewer/context/profile/skill:名称/tool:名称）',

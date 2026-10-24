@@ -98,14 +98,24 @@ def compare(results):
 
 
 class SkillCompare:
+    event_kind = 'skill_comparison_state'
+    preview_key = 'skill_comparison_preview'
+    result_key = 'skill_comparison_result'
+    interface = 'skill-comparison'
+
+    def collect(self, root): return source_files(root)
+    def verify(self, root, state): return reference(root, state['files'])
+    def workflow(self, name, state): return state['skill'] if name == 'with_skill' else None
+    def outcome(self, results): return compare(results)
+
     def __init__(self,store,owner,project):self.store,self.owner,self.project=store,owner,project
 
     def current(self):
-        events=self.store.events(self.owner,self.project,'skill_comparison_state')
+        events=self.store.events(self.owner,self.project,self.event_kind)
         if not events:raise ValueError('Prepare the comparison first')
         return events[-1]['data']
 
-    def save(self,state):self.store.event(self.owner,self.project,'skill_comparison_state',state)
+    def save(self,state):self.store.event(self.owner,self.project,self.event_kind,state)
 
     def setup(self,workspace):
         files=source_files(workspace)
@@ -132,31 +142,33 @@ class SkillCompare:
 
     def preview(self):
         state=self.current()
-        return {'skill_comparison_preview':state,'packet_hash':digest(state)}
+        return {self.preview_key:state,'packet_hash':digest(state)}
 
     async def run(self,prepared,pi_root,provider,model):
         from .native import native_tools
         state=self.current()
         if state['status']!='ready' or digest(state)!=prepared['packet_hash']:raise ValueError('Comparison already attempted or preview stale')
         for arm in state['arms'].values():
-            if source_files(arm['workspace'])!=state['files']:raise ValueError('Workspace copy changed after preview')
+            if self.collect(arm['workspace'])!=state['files']:raise ValueError('Workspace copy changed after preview')
         # Claim before network activity; never silently replay after failure.
         with self.store.transaction():
             if self.current()['status']!='ready':raise ValueError('Comparison already claimed')
             state['status']='running'
             from .domain import canonical,now
             self.store.db.execute('INSERT INTO events(owner,project,kind,data,created) VALUES(?,?,?,?,?)',
-                (self.owner,self.project,'skill_comparison_state',canonical(state),now()))
-        common=state['coding']+'\nUser preferences:\n'+str(state['profile'])+'\nScoped memories:\n'+str(state['memories'])+'\n'+TASK
+                (self.owner,self.project,self.event_kind,canonical(state),now()))
+        common=state['coding']+'\nUser preferences:\n'+str(state['profile'])+'\nScoped memories:\n'+str(state['memories'])+'\n'+state['task']
         for name in state['order']:
             arm=state['arms'][name];root=Path(arm['workspace']);observations=[];usages=[];started=time.monotonic()
-            task=self.store.task(self.owner,self.project,'Skill comparison: '+TASK)
+            totals={'tool_calls':0,'tool_errors':0,'tool_events':0}
+            task=self.store.task(self.owner,self.project,'Paired evaluation: '+state['task'])
             evidence=Evidence(self.store,self.owner,self.project)
-            evidence.record(task,'context_assembled',{'workspace':str(root),'interface':'skill-comparison','arm':name,
-                'comparison_id':state['id'],'skill_ids':[state['skill']['id']] if name=='with_skill' else [],
+            evidence.record(task,'context_assembled',{'workspace':str(root),'interface':self.interface,'arm':name,
+                'comparison_id':state['id'],'skill_ids':[self.workflow(name,state)['id']] if self.workflow(name,state) else [],
                 'memory_context':state['memories'],'source_hash':state['source_hash']})
             evidence.capture(task,'begin')
-            prompt=common+ ('\nManaged workflow:\n'+'\n'.join(state['skill']['payload']['steps']) if name=='with_skill' else '')
+            workflow=self.workflow(name,state)
+            prompt=common+ ('\nManaged workflow:\n'+'\n'.join(workflow['payload']['steps']) if workflow else '')
             command=pi_command(pi_root,tools=True,provider=provider,model=model)+['--tools',native_tools(True),'--thinking','off']
             def observe(event):
                 if event.get('type')=='message_end':
@@ -164,6 +176,9 @@ class SkillCompare:
                     if message.get('role')=='assistant' and isinstance(message.get('usage'),dict):usages.append(message['usage'])
                     return
                 if event.get('type') not in ('tool_execution_start','tool_execution_end'):return
+                totals['tool_events']+=1
+                if event['type']=='tool_execution_start':totals['tool_calls']+=1
+                elif event.get('isError',False):totals['tool_errors']+=1
                 data={'phase':'start' if event['type'].endswith('start') else 'end','toolName':event.get('toolName'),
                     'toolCallId':event.get('toolCallId'),'args':redact(event.get('args')),
                     'output':redact('\n'.join(b.get('text','') for b in (event.get('result') or {}).get('content',[]) if b.get('type')=='text'))[:12000],
@@ -171,7 +186,7 @@ class SkillCompare:
                 if len(observations)<100:observations.append(data);evidence.record(task,'native_tool',data)
             error=None;text='';usage=None
             try:
-                if source_files(root)!=state['files']:raise ValueError('Workspace changed before its assigned run')
+                if self.collect(root)!=state['files']:raise ValueError('Workspace changed before its assigned run')
                 async with asyncio.timeout(115):
                     async with PiRpc(command,root,100,observe) as rpc:
                         await rpc.request('set_auto_retry',enabled=False)
@@ -180,22 +195,23 @@ class SkillCompare:
                         result=await rpc.prompt(prompt);text=redact(result['text'])
                         usage=redact((result.get('message') or {}).get('usage'))
             except Exception as exc:error=redact(str(exc)) or type(exc).__name__
-            checked=reference(root,state['files']);evidence.record(task,'verification',checked);evidence.capture(task,'finish')
+            checked=self.verify(root,state);evidence.record(task,'verification',checked);evidence.capture(task,'finish')
             self.store.finish_task(task,'failed' if error else 'completed',text or error)
             starts={o['toolCallId']:o for o in observations if o['phase']=='start'}
             isolated=any(o['phase']=='end' and not o['isError'] and re.search(r'Ran [1-9]\d* tests?',o['output'])
                 and '-I' in str(starts.get(o['toolCallId'],{}).get('args','')) and o['toolName'] in {'powershell','bash'} for o in observations)
             state['results'][name]={'status':'failed' if error else 'completed','task_id':task,'error':error,'text':text,
-                'reference':checked,'metrics':{'isolated_check_observed':isolated,'tool_calls':len(starts),
-                    'tool_errors':sum(o['phase']=='end' and o['isError'] for o in observations),'elapsed_seconds':round(time.monotonic()-started,2),
+                'reference':checked,'metrics':{'isolated_check_observed':isolated,
+                    'tool_calls':totals['tool_calls'],'tool_errors':totals['tool_errors'],
+                    'trace_truncated':totals['tool_events']>len(observations),'elapsed_seconds':round(time.monotonic()-started,2),
                     'observed_usage':{k:sum(u[k] for u in usages if isinstance(u.get(k),(int,float))) if any(isinstance(u.get(k),(int,float)) for u in usages) else None
                                       for k in ('input','output','cacheRead','cacheWrite','totalTokens')},
                     'reported_cost':sum(u['cost']['total'] for u in usages if isinstance(u.get('cost'),dict) and isinstance(u['cost'].get('total'),(int,float))) if any(isinstance(u.get('cost'),dict) and isinstance(u['cost'].get('total'),(int,float)) for u in usages) else None,
                     'last_message_usage':usage}}
             arm['status']=state['results'][name]['status']
             self.save(state)
-        try:original_unchanged=source_files(state['source'])==state['files']
+        try:original_unchanged=self.collect(state['source'])==state['files']
         except (ValueError,OSError,UnicodeError):original_unchanged=False
-        outcome=compare(state['results']) if original_unchanged else {'outcome':'inconclusive','reason':'Original source changed during experiment'}
+        outcome=self.outcome(state['results']) if original_unchanged else {'outcome':'inconclusive','reason':'Original source changed during experiment'}
         state.update(status='completed',model={'provider':provider,'id':model},comparison=outcome,original_source_unchanged=original_unchanged)
-        self.save(state);return {'skill_comparison_result':state}
+        self.save(state);return {self.result_key:state}

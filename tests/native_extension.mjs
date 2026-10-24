@@ -1,6 +1,6 @@
 // Offline integration: real Python bridge + extension lifecycle, no model calls.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import evolving from '../extensions/evolving.ts';
@@ -153,5 +153,21 @@ try {
   assert.match(widgets['evolving-harness'].join('\n'),/批量改进已启用/);
   await commands.harness('improve status',ctx);
   assert.match(widgets['evolving-harness'].join('\n'),/跟踪后续使用/);
-  console.log('PASS: native extension + Python bridge, context, tools, feedback, reset, deletion, abort; zero model calls');
+  const {component:evalSkill}=await bridge({operation:'component-stage',draft:{name:'skill:eval-fixture',
+    payload:{kind:'skill',description:'Offline evaluation UI fixture',triggers:['test'],steps:['Run actual project tests.']},
+    reason:'Exercise preview and decline without model calls',evidence_ids:[]}});
+  cpSync(resolve('examples/evaluation'),join(temporary,'eval'),{recursive:true});
+  const manifestPath=join(temporary,'eval','suite.json');
+  const evalConfig=JSON.parse(readFileSync(manifestPath,'utf8'));evalConfig.candidate=evalSkill.id;
+  writeFileSync(manifestPath,JSON.stringify(evalConfig));
+  await commands.harness('eval prepare eval/suite.json',ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/通用评测完整载荷/);
+  ctx.ui.confirm=async()=>false;
+  await commands.harness('eval run',ctx);
+  const preparedEval=await bridge({operation:'product-eval-preview'});
+  assert.equal(preparedEval.evaluation_preview.pairs.length,2);
+  assert.ok(preparedEval.evaluation_preview.pairs.every(p=>p.evaluation_pair_preview.status==='ready'));
+  await commands.harness('eval report',ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/HTML报告/);
+  console.log('PASS: native extension + Python bridge, context, tools, feedback, reset, deletion, abort, eval prepare/decline/report; zero model calls');
 } finally { rmSync(temporary, { recursive:true, force:true }); }
