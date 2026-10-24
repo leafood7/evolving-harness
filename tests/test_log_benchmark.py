@@ -7,7 +7,7 @@ import unittest
 from benchmarks.log_inspector.calibrate import calibrate, fingerprint
 from benchmarks.log_inspector.checks import PROBES, probe_source
 from benchmarks.log_inspector.fixtures import apply
-from benchmarks.log_inspector.prepare_pilot import prepare
+from benchmarks.log_inspector.prepare_pilot import prepare, task_prompt
 from evolving_harness.domain import digest
 from evolving_harness.store import Store
 from evolving_harness.task_eval import collect, TaskEvaluation
@@ -65,6 +65,10 @@ class LogBenchmarkTests(unittest.TestCase):
                     state = pair['evaluation_pair_preview']
                     self.assertEqual(state['status'], 'ready'); self.assertEqual(state['memories'], [])
                     self.assertNotIn('Independent evaluator isolated', state['task'])
+                    if state['case_id'] == 'dev-01':
+                        self.assertIn('仅在 --aggregate 聚合模式下', state['task'])
+                        self.assertIn('非聚合模式必须保留“输出 N 条”', state['task'])
+                        self.assertIn('不得写成“输出 N 组”', state['task'])
                     self.assertEqual(state['results'], {})
                     self.assertEqual(state['baseline']['hash'], digest(payload))
                     self.assertEqual(state['candidate']['hash'], digest(candidate))
@@ -74,6 +78,16 @@ class LogBenchmarkTests(unittest.TestCase):
             docs['candidate-skill-draft.json']['sha256'] = 'tampered'
             (preparation / 'candidate-skill-draft.json').write_text(json.dumps(docs['candidate-skill-draft.json']), encoding='utf-8')
             with self.assertRaises(ValueError): prepare(preparation, root / 'another-pilot', report)
+
+    def test_wording_fix_is_local_to_count_task_and_does_not_leak_grader_policy(self):
+        task = dict(id='dev-01', title='修正聚合计数', allowed_changes=['log_inspector/__main__.py'],
+                    acceptance=['Preserve behavior', 'Original tests', 'Independent isolated grading', 'No outside access'])
+        prompt = task_prompt(task)
+        self.assertIn('非聚合模式必须保留“输出 N 条”', prompt)
+        self.assertIn('其他诊断语义、stdout内容和退出码保持不变', prompt)
+        self.assertNotIn('Independent isolated grading', prompt)
+        other = task_prompt(task | {'id': 'dev-05'})
+        self.assertNotIn('输出 N 条', other)
 
 
 if __name__ == '__main__': unittest.main()

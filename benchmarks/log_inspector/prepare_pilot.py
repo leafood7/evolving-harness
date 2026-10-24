@@ -15,6 +15,19 @@ from evolving_harness.store import Store
 from evolving_harness.task_eval import TaskEvaluation, collect
 
 PILOT_IDS = ('dev-01', 'dev-05')
+PROMPT_REVISION = 'diagnostic-units-explicit-v2'
+
+
+def task_prompt(task):
+    """State user-visible behavior explicitly; keep evaluator hints out."""
+    detail = ('仅在 --aggregate 聚合模式下，使用“匹配 N 条”和“输出 N 组”分别报告匹配日志数与实际输出聚合组数；'
+              '--top 截断后按实际输出组数计数，无匹配时输出 0 组。'
+              '非聚合模式必须保留“输出 N 条”，不得写成“输出 N 组”；可增加匹配数，但其他诊断语义、stdout内容和退出码保持不变。'
+              if task['id'] == 'dev-01' else '')
+    # Final three acceptance entries belong to evaluator/isolation policy,
+    # not the actor task. They must not force extra verification in both arms.
+    prompt = task['title'] + '。' + detail + '\n' + '\n'.join(task['acceptance'][:-3])
+    return prompt + '\n允许修改：' + ', '.join(task['allowed_changes']) + '。修改后增加回归测试并报告实际运行结果。'
 
 
 def prepare(preparation, output, calibration):
@@ -55,14 +68,7 @@ def prepare(preparation, output, calibration):
             task = tasks[key]
             allowed = set(p for p in task['allowed_changes'] if p != 'new tests')
             protected = sorted(p for p in files if p not in allowed)
-            # Exact output spelling is specified before any model sees this task.
-            detail = ('诊断中使用“匹配 N 条”和“输出 N 组”分别报告匹配日志数与实际输出聚合组数。'
-                      if key == 'dev-01' else '')
-            # Do not leak evaluator-only instructions into the actor task. In
-            # particular, independent isolated grading is not a user request
-            # that both actors must themselves run an extra isolated check.
-            prompt = task['title'] + '。' + detail + '\n' + '\n'.join(task['acceptance'][:-3])
-            prompt += '\n允许修改：' + ', '.join(task['allowed_changes']) + '。修改后增加回归测试并报告实际运行结果。'
+            prompt = task_prompt(task)
             cases.append({'id': key, 'source': 'source', 'prompt': prompt, 'protected': protected,
                           'checks': [{'name': 'full-isolated-regression', 'args': ['-I', '-X', 'utf8', 'checks/run_tests.py'], 'require_tests': True},
                                      {'name': 'frozen-independent-contract', 'args': ['-X', 'utf8', '-c', probe_source(key)], 'require_tests': False}]})
@@ -78,6 +84,7 @@ def prepare(preparation, output, calibration):
         receipt = {'status': 'PREPARED_NO_MODEL_RUNS', 'model_calls': 0, 'database': str(db),
                    'owner': owner, 'project': project, 'workspace': str(output),
                    'suite_id': preview['evaluation_preview']['id'], 'case_ids': list(PILOT_IDS),
+                   'prompt_revision': PROMPT_REVISION,
                    'baseline': {'id': old['id'], 'hash': old['hash']},
                    'candidate': {'id': new['id'], 'hash': new['hash'], 'active': False},
                    'source_hash': protocol['source']['hash'], 'empty_memory_and_profile': True,
