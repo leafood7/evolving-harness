@@ -81,6 +81,27 @@ class EvaluationTests(unittest.TestCase):
         self.assertNotIn('<script>', document); self.assertIn('&lt;script&gt;', document)
         self.assertEqual(json.loads(Path(result['report_json']).read_text(encoding='utf-8'))['id'], report['id'])
 
+    def test_hyphenated_case_uses_discoverable_hint_and_rejects_skipped_new_test_file(self):
+        self.config['cases'] = [self.case('case-with-hyphens')]; self.write_config()
+        pair = self.eval.prepare(self.root, 'suite.json')['evaluation_preview']['pairs'][0]['evaluation_pair_preview']
+        self.assertIn('tests/test_task_case_with_hyphens.py', pair['task'])
+        self.assertIn('has no Git metadata', pair['task'])
+        self.assertIn('Available tool names: ' + pair['available_tools'], pair['task'])
+        root = Path(pair['arms']['with_skill']['workspace'])
+        invalid = root / 'tests/test_task_case-with-hyphens.py'
+        invalid.write_text('import unittest\nclass Added(unittest.TestCase):\n def test_new(self): self.assertTrue(True)\n', encoding='utf-8')
+        check = reference(root, pair)
+        self.assertEqual(check['status'], 'workspace_invalid')
+        self.assertTrue(check['protected_intact'])
+        self.assertEqual(check['violations'][0]['reason'], 'undiscoverable_test_filename')
+        valid = invalid.with_name('test_task_case_with_hyphens.py'); invalid.rename(valid)
+        (root / 'app.py').write_text('def answer(): return 42\n', encoding='utf-8')
+        check = reference(root, pair)
+        self.assertEqual(check['status'], 'passed'); self.assertEqual(check['test_count'], 2)
+        # Historical frozen states retain their original grading policy.
+        valid.rename(invalid); legacy = {k:v for k,v in pair.items() if k != 'test_discovery_policy'}
+        self.assertEqual(reference(root, legacy)['status'], 'passed')
+
     def test_actual_regression_blocks_recommendation_and_attempt_cannot_replay(self):
         preview = self.eval.prepare(self.root, 'suite.json'); Actor.fail_candidate = True
         report = self.run_all(preview)['evaluation_report']

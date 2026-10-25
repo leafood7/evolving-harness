@@ -129,6 +129,8 @@ class Components:
             if c['payload']['kind']=='skill':
                 from .task_eval import assert_promotion_allowed
                 assert_promotion_allowed(self.store,self.owner,self.project,key)
+                from .eval_batch import assert_batch_promotion_allowed
+                assert_batch_promotion_allowed(self.store,self.owner,self.project,key)
             active=self.active(c['name'])
             if (active['id'] if active else None)!=c['parent']: raise ValueError('Active baseline changed; create a new candidate')
             self.store.db.execute('INSERT INTO component_active VALUES(?,?,?,?) ON CONFLICT(owner,project,name) DO UPDATE SET id=excluded.id',

@@ -6,15 +6,22 @@
 
 启动与环境配置见 [README](README.md)。沿用原生 Pi 界面，独立 Python 控制层，不修改 Pi 源码。已有数据库可继续使用；新增组件表自动创建，不替换已有记忆或策略。
 
-## 先看这两个入口
+## 日常入口
 
 ```text
-/reload
-/harness center
-/harness demo recursive
+/harness home
+/harness card
+/harness card full
+/harness rate 满意
+/harness rate 需调整 真实意见
+/harness ratings
 ```
 
-`center` 显示当前项目组件、用户偏好及完整报告路径。`demo recursive` 在临时数据库里运行有限规则的两代升级：v1生成v2，启用v2后由它生成v3，v3进入下一次记忆评审指令。无模型调用、不改当前项目；这是确定性机制验收，不是模型自主能力增长的证据。
+当前操作以 [快速指南](examples/quickstart/README.md) 和 [卡片与反馈说明](examples/completion/README.md) 为准。启动首页区分日常功能与实验功能；卡片不会把模型自述、缺失验收或旧代码的结果当作当前验证通过。满意不触发自动升级。
+
+## 进阶：组件与递归演示
+
+`/harness center` 查看组件。`/harness demo recursive` 在临时数据库运行有边界的两代规则演示，不调用模型、不改变当前项目。这些是管理和实验入口，不是使用前必须执行的步骤，也不证明自主能力增长。以下保留仍受支持的进阶功能与限制。
 
 ## 用户中心与上下文
 

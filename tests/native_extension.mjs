@@ -1,6 +1,7 @@
 // Offline integration: real Python bridge + extension lifecycle, no model calls.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
+import vm from 'node:vm';
+import { mkdtempSync, mkdirSync, rmSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import evolving from '../extensions/evolving.ts';
@@ -41,6 +42,9 @@ evolving({ on: (name, handler) => { handlers[name] = handler; },
 try {
   await handlers.session_start({}, ctx);
   assert.match(status, /coding v1/);
+  assert.match(widgets['evolving-harness'].join('\n'),/Harness 使用入口/);
+  assert.match(widgets['evolving-harness'].join('\n'),/暂无任务/);
+  assert.match(widgets['evolving-harness'].join('\n'),/实验/);
   await commands.memory('add use unittest', ctx);
   const first = { messageType: 'user', prompt: 'fix tests', systemPromptOptions: { sections: {} } };
   await handlers.before_agent_start(first, ctx);
@@ -48,8 +52,34 @@ try {
   await handlers.tool_execution_start({ toolCallId: 'one', toolName: 'bash', args:{command:'fixture only'} }, ctx);
   await handlers.tool_execution_end({ toolCallId: 'one', toolName: 'bash', isError: false,
     result:{content:[{type:'text',text:'fixture result'}]} }, ctx);
-  handlers.message_end({ message: { role: 'assistant', content: [{type:'thinking',thinking:'omit'}, {type:'text',text:'done'}], stopReason:'stop' } }, ctx);
+  await handlers.message_end({ message: { role: 'assistant', content: [{type:'thinking',thinking:'omit'}, {type:'text',text:'done'}], stopReason:'stop',usage:{totalTokens:25,cost:{total:0.02}} } }, ctx);
   await handlers.agent_settled({ aborted: false }, ctx);
+  assert.match(widgets['evolving-harness'].join('\n'), /任务完成卡片/);
+  assert.match(widgets['evolving-harness'].join('\n'), /需要独立验证/);
+  assert.ok(widgets['evolving-harness'].length<=9);
+  await commands.harness('card',ctx);
+  const completion=await bridge({operation:'task-card'});
+  assert.equal(completion.completion_card.reported_cost,0.02);
+  assert.equal(completion.completion_card.verification.protected_intact,null);
+  assert.ok(completion.card_html.endsWith('.html'));
+  await commands.harness('card full',ctx);
+  assert.match(notifications.at(-1),/完整卡片/);
+  await commands.harness('guide',ctx);
+  assert.match(notifications.at(-1),/完整使用说明/);
+  const page=readFileSync(completion.card_html,'utf8');
+  const script=page.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const listeners={}, fields={
+    'feedback-note':{value:'需要更清楚的中文示例'},'feedback-target':{value:'memory'},
+    'feedback-message':{textContent:''},'feedback-command':{value:'',focus(){},select(){}}
+  };
+  let clipboard='';
+  vm.runInNewContext(script,{document:{querySelectorAll:()=>['satisfied','adjust','issue'].map(rating=>({dataset:{rating},addEventListener:(_kind,fn)=>{listeners[rating]=fn;}})),
+    getElementById:id=>fields[id]},navigator:{clipboard:{writeText:async text=>{clipboard=text;}}},crypto:{randomUUID:()=> 'browser-fixture-one'}});
+  await listeners.adjust();
+  const generated=JSON.parse(clipboard.slice('/harness rate '.length));
+  assert.equal(generated.task_id,completion.completion_card.task_id);
+  assert.equal(generated.rating,'adjust');assert.equal(generated.target,'memory');
+  assert.match(fields['feedback-message'].textContent,/尚未保存/);
   await commands.harness('feedback duplicate repeated instruction', ctx);
   await commands.harness('note user correction', ctx);
   await commands.harness('review local', ctx);
@@ -65,6 +95,7 @@ try {
   assert(evidence.events.some(e => e.kind === 'native_tool' && e.data.args.command === 'fixture only'));
   assert(evidence.events.some(e => e.kind === 'user_feedback'));
   await commands.harness('', ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/Harness 使用入口/);
   await commands.harness('memory-review', ctx);
   assert.match(widgets['evolving-harness'].join('\n'), /记忆效果评审/);
   assert.match(widgets['evolving-harness'].join('\n'), /证据不足/);
@@ -169,5 +200,47 @@ try {
   assert.ok(preparedEval.evaluation_preview.pairs.every(p=>p.evaluation_pair_preview.status==='ready'));
   await commands.harness('eval report',ctx);
   assert.match(widgets['evolving-harness'].join('\n'),/HTML报告/);
+  // A fake Pi entry is fingerprinted for preparation only; execution is declined.
+  process.env.EH_PI_ROOT=join(temporary,'fake-pi');
+  mkdirSync(join(process.env.EH_PI_ROOT,'packages/coding-agent/dist/bundle'),{recursive:true});
+  writeFileSync(join(process.env.EH_PI_ROOT,'packages/coding-agent/dist/bundle/cli.js'),'throw new Error("offline fixture must never execute");');
+  const batchConfig={version:1,name:'Offline batch',baseline:null,candidate:evalSkill.id,
+    model:{provider:'fixture',model:'never-call'},repeats:2,
+    limits:{max_arm_runs:8,max_seconds:600,max_tokens:10000,max_model_messages:100,max_estimated_cost:1},
+    development:[evalConfig.cases[0]],heldout:[evalConfig.cases[1]]};
+  writeFileSync(join(temporary,'eval','batch.json'),JSON.stringify(batchConfig));
+  await commands.harness('batch prepare eval/batch.json',ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/批量评测准备/);
+  assert.match(widgets['evolving-harness'].join('\n'),/整批消息上限/);
+  assert.match(widgets['evolving-harness'].join('\n'),/单组消息上限/);
+  await commands.harness('batch run',ctx);
+  const batchPreview=await bridge({operation:'product-batch-preview'});
+  assert.equal(batchPreview.batch_preview.entries.length,2);
+  assert.equal(batchPreview.batch_preview.status,'prepared');
+  assert.equal(batchPreview.batch_preview.execution_policy.planned_arms,8);
+  assert(!JSON.stringify(batchPreview).includes('import-contract'));
+  await assert.rejects(bridge({operation:'product-batch-unlock',batch_id:batchPreview.batch_preview.id,
+    packet_hash:batchPreview.packet_hash,confirmed:true}),/Finish development/);
+  await commands.harness('batch status',ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/HTML报告/);
+  await commands.harness('batch stop',ctx);
+  assert.equal((await bridge({operation:'product-batch-status'})).batch_report.state.status,'stopped');
+  const taskId=evidence.task.id;
+  ctx.ui.confirm=async()=>false;
+  const rating={task_id:taskId,rating:'adjust',target:'workflow',note:'请先确认工具可用性',request_id:'offline-feedback-one'};
+  await commands.harness('rate '+JSON.stringify(rating),ctx);
+  assert.equal((await bridge({operation:'task-rating-list',task_id:taskId})).task_feedback.ratings.length,0);
+  ctx.ui.confirm=async()=>true;
+  await commands.harness('rate '+JSON.stringify(rating),ctx);
+  const feedback=await bridge({operation:'task-rating-list',task_id:taskId});
+  assert.equal(feedback.task_feedback.ratings.length,1);
+  assert.equal(feedback.completion_card.user_outcome,'adjust');
+  const suggestion=feedback.task_feedback.suggestions[0];
+  assert.equal(suggestion.status,'pending');
+  await commands.harness(`suggestion review ${suggestion.id} ${suggestion.revision}`,ctx);
+  const reviewed=(await bridge({operation:'task-rating-list',task_id:taskId})).task_feedback.suggestions[0];
+  assert.equal(reviewed.status,'reviewed_not_applied');
+  await commands.harness('ratings '+taskId,ctx);
+  assert.match(widgets['evolving-harness'].join('\n'),/已审阅，未启用/);
   console.log('PASS: native extension + Python bridge, context, tools, feedback, reset, deletion, abort, eval prepare/decline/report; zero model calls');
 } finally { rmSync(temporary, { recursive:true, force:true }); }

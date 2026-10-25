@@ -47,6 +47,9 @@ def dispatch(store: Store, owner: str, project: str, request: dict) -> dict:
     memory = Memory(store)
     operation = request['operation']
     evidence = Evidence(store, owner, project)
+    if operation == 'home':
+        from .home import export
+        return export(store,owner,project,request.get('workspace'))
     if (operation.startswith(('product-','component-','strategy-','tool-','experiments-'))
         or operation == 'skill-from-experience'):
         from .product import handle
@@ -154,6 +157,36 @@ def dispatch(store: Store, owner: str, project: str, request: dict) -> dict:
         raise ValueError('Unknown reflection operation')
     if operation == 'task':
         return with_report(store, owner, project, 'task', evidence.bundle(request.get('task_id')))
+    if operation == 'task-card':
+        from .completion import export
+        return export(store, owner, project, request.get('task_id'))
+    if operation in {'task-rating-submit','task-rating-list','task-suggestion-decide'}:
+        from .task_feedback import TaskFeedback
+        from .completion import export
+        task_ratings = TaskFeedback(store, owner, project)
+        if operation == 'task-suggestion-decide':
+            if request.get('confirmed') is not True: raise ValueError('Confirm this review; it will not apply a rule')
+            result = task_ratings.decide(request['id'],request['revision'],request['action'])
+            task = result['suggestions'][0]['task_id'] if result['suggestions'] else None
+        else:
+            task = request.get('task_id') or evidence.bundle()['task']['id']
+            if operation == 'task-rating-submit':
+                if request.get('confirmed') is not True: raise ValueError('Confirm feedback for the selected task')
+                result = task_ratings.submit(task,request['rating'],request.get('target','task'),request.get('note',''),request['request_id'])
+            else: result = task_ratings.list(task)
+        return {'task_feedback':result, **export(store,owner,project,task)}
+    if operation == 'usage':
+        from .completion import number
+        task = request['task_id']
+        if store.get_task(owner, project, task)['state'] != 'running':
+            raise ValueError('Task already settled')
+        raw = request.get('usage')
+        if not isinstance(raw, dict): raise ValueError('Usage must be an object')
+        data = {key: number(raw.get(key)) for key in ('input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens')}
+        cost = raw.get('cost')
+        data['reported_cost'] = number(cost.get('total')) if isinstance(cost, dict) else None
+        data['source'] = 'native-assistant-message-usage'
+        return {'evidence_id': evidence.record(task, 'model_usage', data)}
     if operation == 'verify':
         if os.environ.get('EH_ALLOW_WRITE') != '1':
             raise ValueError('Running project tests requires restarting native with --allow-write')
@@ -174,7 +207,8 @@ def dispatch(store: Store, owner: str, project: str, request: dict) -> dict:
         if standalone:
             evidence.capture(task, 'finish')
             store.finish_task(task, 'completed', 'Local unittest outcome: ' + result['status'])
-        return with_report(store, owner, project, 'task', evidence.bundle(task))
+        from .completion import export
+        return with_report(store, owner, project, 'task', evidence.bundle(task)) | export(store, owner, project, task)
     if operation == 'note':
         task = request.get('task_id') or evidence.bundle()['task']['id']
         note = request.get('note', '').strip()
@@ -224,13 +258,22 @@ def dispatch(store: Store, owner: str, project: str, request: dict) -> dict:
         state = request['state']
         if state not in {'completed', 'failed', 'aborted', 'interrupted'}:
             raise ValueError('Invalid task outcome')
+        from .completion import number
+        elapsed = number(request.get('elapsed_ms'))
+        if request.get('elapsed_ms') is not None and (elapsed is None or elapsed > 604800000):
+            raise ValueError('Invalid task elapsed time')
+        if elapsed is not None:
+            evidence.record(task, 'execution_metrics', {'elapsed_seconds': elapsed / 1000,
+                            'source': 'native-extension-clock'})
         evidence.capture(task, 'finish')
         store.finish_task(task, state, redact(request.get('text', '')))
         audit = memory.audit(owner, project)
         from .strategy import Strategy
         strategy_observation = Strategy(store,owner,project).observe_task(task)
         store.event(owner, project, 'native_settled', {'state': state, 'audit': audit}, task)
-        return {'task_id': task, 'state': state, 'audit': audit,'strategy_observation':strategy_observation}
+        from .completion import export
+        return {'task_id': task, 'state': state, 'audit': audit,'strategy_observation':strategy_observation,
+                **export(store, owner, project, task)}
     if operation == 'memory-list':
         return with_report(store, owner, project, 'memories', {'memories': memory.list(owner, project)})
     if operation == 'memory-add':

@@ -91,7 +91,7 @@ def prepare(preparation, output, calibration):
                    'new_sessions_and_randomized_arm_order': True,
                    'pilot_only_not_formal_repeat_study': True,
                    'live_requirements': 'Review full payload, agree money/time budget, then confirm four task runs. No execution was authorized or made by this preparer.',
-                   'formal_remaining': 'Repeat-index tracking, protected development/heldout phases, batch budget enforcement and intervention records remain separate follow-up work.'}
+                   'scope_notice': 'This legacy teaching pilot is not a repeated study. Use the implemented batch controller for repeat indices, split isolation, budgets and intervention records; no automatic live runs.'}
         (output / 'prepared.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
         evaluation.report()
         return receipt

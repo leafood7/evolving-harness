@@ -19,6 +19,9 @@ from .personalization import budget_memories
 from .rpc import PiRpc,pi_command
 from .runtime import redact
 
+MODEL_TIMEOUT = 100
+ARM_MODEL_TIMEOUT = 115
+
 TASK='''将日志工具的文本和JSONL输入解析函数从 log_inspector/core.py 移到新的
 log_inspector/parsers.py，保留 core 中原公开导入接口的兼容性，不改变CLI现有行为。
 更新相关导入和README，添加必要的回归测试，运行项目测试并报告结果。
@@ -149,6 +152,12 @@ class SkillCompare:
     async def run(self,prepared,pi_root,provider,model):
         from .native import native_tools
         state=self.current()
+        control=getattr(self,'control',None)
+        def stopped():
+            state.update(status='stopped',stop_reason=control.stop_reason,
+                         comparison={'outcome':'inconclusive','reason':control.stop_reason})
+            self.save(state)
+            return {self.result_key:state}
         if state['status']!='ready' or digest(state)!=prepared['packet_hash']:raise ValueError('Comparison already attempted or preview stale')
         for arm in state['arms'].values():
             if self.collect(arm['workspace'])!=state['files']:raise ValueError('Workspace copy changed after preview')
@@ -161,6 +170,7 @@ class SkillCompare:
                 (self.owner,self.project,self.event_kind,canonical(state),now()))
         common=state['coding']+'\nUser preferences:\n'+str(state['profile'])+'\nScoped memories:\n'+str(state['memories'])+'\n'+state['task']
         for name in state['order']:
+            if control and not control.before_arm(name):return stopped()
             arm=state['arms'][name];root=Path(arm['workspace']);observations=[];usages=[];started=time.monotonic()
             totals={'tool_calls':0,'tool_errors':0,'tool_events':0}
             task=self.store.task(self.owner,self.project,'Paired evaluation: '+state['task'])
@@ -176,6 +186,7 @@ class SkillCompare:
                 if event.get('type')=='message_end':
                     message=event.get('message') or {}
                     if message.get('role')=='assistant' and isinstance(message.get('usage'),dict):usages.append(message['usage'])
+                    if control:control.observe(event)
                     return
                 if event.get('type') not in ('tool_execution_start','tool_execution_end'):return
                 totals['tool_events']+=1
@@ -186,23 +197,29 @@ class SkillCompare:
                     'output':redact('\n'.join(b.get('text','') for b in (event.get('result') or {}).get('content',[]) if b.get('type')=='text'))[:12000],
                     'isError':event.get('isError',False)}
                 if len(observations)<100:observations.append(data);evidence.record(task,'native_tool',data)
-            error=None;text='';usage=None
+            error=None;text='';usage=None;execution_limit=None
             try:
                 if self.collect(root)!=state['files']:raise ValueError('Workspace changed before its assigned run')
-                async with asyncio.timeout(115):
-                    async with PiRpc(command,root,100,observe) as rpc:
+                allowance=min(ARM_MODEL_TIMEOUT,control.remaining_seconds()) if control else ARM_MODEL_TIMEOUT
+                if allowance<=0:raise TimeoutError('Batch time budget exhausted')
+                async with asyncio.timeout(allowance):
+                    async with PiRpc(command,root,min(MODEL_TIMEOUT,allowance),observe) as rpc:
                         await rpc.request('set_auto_retry',enabled=False)
                         selected=(await rpc.request('get_state')).get('model') or {}
                         if (selected.get('provider'),selected.get('id'))!=(provider,model):raise ValueError('Confirmed model mismatch')
                         result=await rpc.prompt(prompt);text=redact(result['text'])
                         usage=redact((result.get('message') or {}).get('usage'))
-            except Exception as exc:error=redact(str(exc)) or type(exc).__name__
+            except Exception as exc:
+                error=redact(str(exc)) or type(exc).__name__
+                if isinstance(exc,TimeoutError):
+                    execution_limit='batch_time_limit' if control and control.remaining_seconds()<=0 else 'arm_model_timeout'
             checked=self.verify(root,state);evidence.record(task,'verification',checked);evidence.capture(task,'finish')
             self.store.finish_task(task,'failed' if error else 'completed',text or error)
             starts={o['toolCallId']:o for o in observations if o['phase']=='start'}
             isolated=any(o['phase']=='end' and not o['isError'] and re.search(r'Ran [1-9]\d* tests?',o['output'])
                 and '-I' in str(starts.get(o['toolCallId'],{}).get('args','')) and o['toolName'] in {'powershell','bash'} for o in observations)
             state['results'][name]={'status':'failed' if error else 'completed','task_id':task,'error':error,'text':text,
+                'execution_limit':execution_limit,
                 'reference':checked,'metrics':{'isolated_check_observed':isolated,
                     'tool_calls':totals['tool_calls'],'tool_errors':totals['tool_errors'],
                     'trace_truncated':totals['tool_events']>len(observations),'elapsed_seconds':round(time.monotonic()-started,2),
@@ -212,6 +229,10 @@ class SkillCompare:
                     'last_message_usage':usage}}
             arm['status']=state['results'][name]['status']
             self.save(state)
+            if control:
+                control.after_arm(state['results'][name])
+                self.save(state)
+                if control.stop_reason:return stopped()
         try:original_unchanged=self.collect(state['source'])==state['files']
         except (ValueError,OSError,UnicodeError):original_unchanged=False
         outcome=self.outcome(state['results']) if original_unchanged else {'outcome':'inconclusive','reason':'Original source changed during experiment'}

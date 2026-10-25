@@ -19,7 +19,7 @@ from .store import Store
 SUFFIXES = {'.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.md', '.toml',
             '.yaml', '.yml', '.txt', '.html', '.css', '.sql', '.sh', '.ps1'}
 SKIP_DIRS = {'node_modules', '__pycache__', 'dist', 'build', 'venv', 'release',
-             'native-reports', 'native-sessions', 'pi-sessions'}
+             'native-reports', 'native-sessions', 'pi-sessions', 'task-cards'}
 
 
 def snapshot(workspace: str | None) -> dict:
@@ -169,7 +169,7 @@ class Evidence:
         delta = changes(snapshots[0]['data']['snapshot'], snapshots[-1]['data']['snapshot']) if len(snapshots) >= 2 else []
         latest = verifications[-1] if verifications else None
         freshness = 'not_checked'
-        if latest:
+        if latest and isinstance(latest['data'].get('cwd'), str) and isinstance(latest['data'].get('after_snapshot'), dict):
             current = snapshot(latest['data']['cwd'])
             freshness = ('unavailable' if not current.get('manifest_hash') else
                          'matches_recorded_text_scope' if current.get('manifest_hash') ==
@@ -177,7 +177,7 @@ class Evidence:
         return {'task': stored, 'summary': {'tool_records': sum(e['data'].get('phase') != 'start' for e in tools),
                 'tool_errors': sum(bool(e['data'].get('isError')) for e in tools),
                 'verification_count': len(verifications),
-                'latest_verification': latest['data']['status'] if latest else 'unverified',
+                'latest_verification': latest['data'].get('status', 'unverified') if latest else 'unverified',
                 'verification_freshness': freshness, 'changed_files': [d['path'] for d in delta]},
                 'changes': delta, 'events': [{'evidence_id': e['seq'], **e} for e in events],
                 'limitations': ['Only bounded declared text/source scope is fingerprinted; not a full repository snapshot.',

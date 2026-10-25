@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "name": "Repeated workflow teaching example",
+  "baseline": null,
+  "candidate": "REPLACE_WITH_COMPONENT_ID",
+  "model": {
+    "provider": "REPLACE_WITH_PROVIDER",
+    "model": "REPLACE_WITH_MODEL"
+  },
+  "repeats": 3,
+  "limits": {
+    "max_arm_runs": 12,
+    "max_seconds": 2400,
+    "max_tokens": 200000,
+    "max_estimated_cost": 2,
+    "max_model_messages": null,
+    "max_arm_model_messages": 48
+  },
+  "development": [
+    {
+      "id": "ordinary-change",
+      "source": "normalization",
+      "prompt": "Update app.normalize: strip surrounding whitespace, uppercase the level, accept INFO and ERROR, and reject other levels with ValueError. Preserve the existing interface, add regression tests and run project tests.",
+      "protected": [],
+      "checks": [
+        {
+          "name": "regression",
+          "args": [
+            "-I",
+            "-X",
+            "utf8",
+            "checks/run_tests.py"
+          ],
+          "require_tests": true
+        },
+        {
+          "name": "level-contract",
+          "args": [
+            "-c",
+            "from app import normalize; assert normalize(' info ')=='INFO'; assert normalize('error')=='ERROR'\ntry: normalize('invalid')\nexcept ValueError: pass\nelse: raise AssertionError('unknown levels must be rejected')"
+          ],
+          "require_tests": false
+        }
+      ]
+    }
+  ],
+  "heldout": [
+    {
+      "id": "import-change",
+      "source": "imports",
+      "prompt": "Move toolkit.core.parse into toolkit.parsers. Keep from toolkit.core import parse working and preserve behavior. Add regression tests and run project tests.",
+      "protected": [],
+      "checks": [
+        {
+          "name": "regression",
+          "args": [
+            "-I",
+            "-X",
+            "utf8",
+            "checks/run_tests.py"
+          ],
+          "require_tests": true
+        },
+        {
+          "name": "import-contract",
+          "args": [
+            "-c",
+            "from toolkit import core,parsers; assert core.parse is parsers.parse; assert parsers.parse.__module__=='toolkit.parsers'; assert core.parse('42')==42"
+          ],
+          "require_tests": false
+        }
+      ]
+    }
+  ]
+}

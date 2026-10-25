@@ -32,17 +32,23 @@ python -m evolving_harness --project my-project native --workspace 'D:\path\to\p
 
 ## 日常使用
 
-在 Pi 中完成真实编程任务，然后查看证据与改进建议：
+优先使用 [当前快速指南](examples/quickstart/README.md)。日志工具与本仓库相邻时，双击 `start-log-inspector.cmd`；通用项目仍使用上面的 `native --workspace` 命令。
+
+启动后直接显示当前项目与常用操作。在 Pi 中：
 
 ```text
-/harness center
-/memory add 本项目的测试命令和用户约定
-/harness profile
-/harness review local
-/harness memory-review
-/harness improve
-/harness improve status
+/harness home
+/harness card
+/harness card full
+/harness rate 满意
+/harness rate 需调整 这里填写真实调整意见
+/harness ratings
+/memory list
 ```
+
+查看与反馈不调用模型；直接提出编程需求会调用模型并可能计费。卡片默认精简显示，HTML保留完整差异与证据。满意只记录本次结果；其他反馈生成待审核建议，不自动写记忆或启用Skill。
+
+记忆与策略实验、模型复盘、批量改进属于进阶功能，不是日常使用的必经步骤。
 
 - **执行记录**：保存任务、可见工具轨迹、代码快照与验证证据。任务完成不等于测试通过；零测试不算通过。
 - **用户与项目记忆**：支持查看、编辑、停用、候选修订及回退，任务记录实际使用的记忆版本。用户范围限同一数据库，不是跨数据库云同步或网络鉴权。
@@ -58,6 +64,8 @@ python -m evolving_harness --project my-project native --workspace 'D:\path\to\p
 
 可先运行零模型演示：`python examples/evaluation/offline_demo.py --output .harness/eval-demo-001`。配置协议和真实任务操作见 [评测使用说明](examples/evaluation/README.md)。这是可配置的 Python 任务入口，不再依赖日志工具；不含模型裁判或 OS 沙盒。
 
+批量重复与开发/预留隔离使用 `/harness batch`，详见 [批量评测协议](examples/evaluation/BATCH.md)。任务完成卡片与反馈详见 [卡片与反馈说明](examples/completion/README.md)。两者均已实现基础流程，不能据此宣称真实进化收益。
+
 ## 实验与边界
 
 提供记忆故障模拟、跨任务实验、复盘策略基准和日志项目 Skill 对照。它们验证不同层次，不能相互替代。
@@ -70,13 +78,13 @@ python -m evolving_harness --project my-project native --workspace 'D:\path\to\p
 
 ## 目录与开发
 
-| 路径 | 用途 |
-|---|---|
-| `evolving_harness/` | Python 控制层、存储、记忆、候选、评估、实验与 RPC |
-| `extensions/` | Pi 原生扩展及受控故障实验扩展 |
-| `tests/` | 离线回归与原生扩展协议测试 |
-| `examples/sample_project/` | 离线演示使用的小型代码样例 |
-| `PRODUCT_GUIDE.md` | 当前产品操作说明 |
+| 路径                         | 用途                             |
+| -------------------------- | ------------------------------ |
+| `evolving_harness/`        | Python 控制层、存储、记忆、候选、评估、实验与 RPC |
+| `extensions/`              | Pi 原生扩展及受控故障实验扩展               |
+| `tests/`                   | 离线回归与原生扩展协议测试                  |
+| `examples/sample_project/` | 离线演示使用的小型代码样例                  |
+| `PRODUCT_GUIDE.md`         | 当前产品操作说明                       |
 
 源码运行即可，无需 pip 安装。开发约定见 [AGENTS.md](AGENTS.md)。Python 回归命令：`python -m unittest discover -s tests -v`。原生扩展桥测试需要支持 TypeScript 类型擦除的 Node：`node --experimental-strip-types tests/native_extension.mjs`。协议测试不调用外部模型。
 

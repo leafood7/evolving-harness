@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 
 from .components import Components
 from .domain import digest, uid
@@ -51,7 +52,7 @@ def collect(root, excluded=()):
         raise ValueError('Expected an existing source directory')
     files = {}; total = 0
     for base, dirs, names in os.walk(root, followlinks=False):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE | {'task-evals', 'skill-comparisons'} and not d.startswith('.')]
+        dirs[:] = [d for d in dirs if d not in EXCLUDE | {'task-evals', 'skill-comparisons', 'task-cards'} and not d.startswith('.')]
         for name in dirs + names:
             if linked(Path(base) / name):
                 raise ValueError('Source links and junctions are not supported')
@@ -139,7 +140,14 @@ def integrity(root, state):
     try:
         # Also reject new links and source-limit violations; don't mislabel them
         # as modifications to an otherwise unchanged protected file.
-        collect(root, state.get('excluded', []))
+        captured = collect(root, state.get('excluded', []))
+        if state.get('test_discovery_policy') == 'identifier-test-files-v1':
+            for name in captured:
+                path = PurePosixPath(name)
+                if (name not in state['files'] and name.startswith('tests/') and path.suffix == '.py'
+                        and path.name.startswith('test') and not path.stem.isidentifier()):
+                    violations.append({'path': name, 'reason': 'undiscoverable_test_filename', 'protected': False,
+                                       'detail': 'unittest discovery skips non-identifier module names; use underscores.'})
     except (ValueError, OSError, UnicodeError) as exc:
         violations.append({'path': '.', 'reason': 'workspace_invalid', 'protected': False,
                            'detail': redact(str(exc))[:1000]})
@@ -151,20 +159,24 @@ def intact(root, state):
     return integrity(root, state)['integrity_ok']
 
 
-def reference(root, state):
+def reference(root, state, max_seconds=None):
     root = Path(root)
     initial = integrity(root, state)
     if not initial['integrity_ok']:
         return {'status': 'protected_changed' if not initial['protected_intact'] else 'workspace_invalid', **initial}
     before = snapshot(str(root)); outputs = []; valid = True; counts = []
+    deadline = time.monotonic() + max_seconds if max_seconds is not None else None
     env = os.environ.copy(); env.pop('PYTHONPATH', None); env['PYTHONUTF8'] = '1'
     for check in state['checks']:
+        remaining = min(10, deadline - time.monotonic()) if deadline is not None else 10
+        if remaining <= 0:
+            return {'status': 'timeout', 'budget_exhausted': True, 'checks': outputs, **integrity(root, state)}
         args = [sys.executable, *check['args']]
         try:
             with tempfile.TemporaryFile() as capture:
                 child = subprocess.Popen(args, cwd=root, env=env, stdout=capture, stderr=subprocess.STDOUT)
                 try:
-                    child.wait(timeout=10)
+                    child.wait(timeout=remaining)
                 except subprocess.TimeoutExpired:
                     child.kill(); child.wait()
                     return {'status': 'timeout', 'checks': outputs, **integrity(root, state)}
@@ -221,14 +233,17 @@ class TaskPair(SkillCompare):
         raise ValueError('Evaluation pair not found in current scope')
 
     def collect(self, root): return collect(root, self.current().get('excluded', []))
-    def verify(self, root, state): return reference(root, state)
+    def verify(self, root, state):
+        control = getattr(self, 'control', None)
+        return reference(root, state, control.remaining_seconds() if control else None)
     def workflow(self, name, state):
         return state['candidate'] if name == 'with_skill' else state['baseline']
 
 
 class TaskEvaluation:
-    def __init__(self, store, owner, project):
+    def __init__(self, store, owner, project, frozen_context=None):
         self.store, self.owner, self.project = store, owner, project
+        self.frozen_context = frozen_context
 
     def current(self, suite_id=None):
         for event in reversed(self.store.events(self.owner, self.project, 'task_eval_suite')):
@@ -255,6 +270,9 @@ class TaskEvaluation:
         profile = Components(self.store, self.owner, '@user').seed('profile')['payload']
         context = registry.seed('context')['payload']
         policy = self.store.current(self.owner, self.project, 'memory-policy')['payload']
+        if self.frozen_context is not None:
+            coding = self.frozen_context['coding']
+            profile = self.frozen_context['profile']
         # Validate every source before creating any state or workspaces.
         cases = []
         for case in config['cases']:
@@ -278,16 +296,24 @@ class TaskEvaluation:
                 for name_, text in files.items():
                     p = target / name_; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding='utf-8')
                 arms[name] = {'workspace': str(target), 'status': 'ready'}
-            memories = select_memories(Memory(self.store).list(self.owner, self.project), policy,
-                                       owner=self.owner, project=self.project, query=case['prompt'])
-            memories = budget_memories(memories, context)
+            if self.frozen_context is not None:
+                memories = self.frozen_context['memories']
+            else:
+                memories = select_memories(Memory(self.store).list(self.owner, self.project), policy,
+                                           owner=self.owner, project=self.project, query=case['prompt'])
+                memories = budget_memories(memories, context)
+            from .native import native_tools
+            available_tools = native_tools(True)
             constraints = '\nModify only this workspace copy. Do not change these existing protected files: ' + ', '.join(protected)
-            constraints += '\nAll existing tests/ files are read-only: do not edit, append tests to, rename or delete them. Add regression tests only in NEW files, e.g. tests/test_task_' + case['id'] + '.py. Adding assertions to an existing protected test file is also forbidden.'
+            constraints += '\nThis source-only copy has no Git metadata: do not assume git status/diff works or claim a clean git diff. Track the files you edit and check their contents against what you read before editing. Available tool names: ' + available_tools + '.'
+            constraints += '\nAll existing tests/ files are read-only: do not edit, append tests to, rename or delete them. Add regression tests only in NEW files, e.g. tests/test_task_' + case['id'].replace('-', '_') + '.py. New test module names must be valid Python identifiers; use underscores, not hyphens. Adding assertions to an existing protected test file is also forbidden.'
             constraints += '\nDo not install dependencies, access the network or read other directories. Run project tests and report actual results.'
             state = {'id': pair_id, 'suite_id': suite_id, 'case_id': case['id'], 'status': 'ready',
                      'source': str(source), 'source_hash': digest(files), 'files': files,
                      'excluded': excluded,
                      'task': case['prompt'] + constraints, 'checks': case['checks'], 'protected': protected,
+                     'test_discovery_policy': 'identifier-test-files-v1',
+                     'available_tools': available_tools,
                      'baseline': baseline, 'candidate': candidate, 'coding': coding, 'profile': profile,
                      'memories': [{k: m[k] for k in ('id', 'revision', 'content')} for m in memories],
                      'arms': arms, 'order': secrets.SystemRandom().sample(list(arms), 2), 'results': {}}
@@ -311,6 +337,8 @@ class TaskEvaluation:
             raise ValueError('Pair is outside selected suite')
         pair = TaskPair(self.store, self.owner, self.project, pair_id)
         preview = pair.preview()
+        if preview['evaluation_pair_preview'].get('batch_managed'):
+            raise ValueError('Use the batch controller for this managed pair and its limits')
         if preview['packet_hash'] != packet_hash:
             raise ValueError('Evaluation preview changed or already attempted')
         await pair.run(preview, pi_root, provider, model)
@@ -326,6 +354,7 @@ class TaskEvaluation:
             for name, result in state['results'].items():
                 arms['baseline' if name == 'without_skill' else 'candidate'] = {
                     'task_id': result['task_id'], 'status': result['status'], 'error': result['error'],
+                    'execution_limit': result.get('execution_limit'),
                     'reference': result['reference'], 'metrics': result['metrics'], 'answer': result['text']}
             rows.append({'case_id': state['case_id'], 'pair_id': key, 'outcome': outcome,
                          'model': state.get('model'),

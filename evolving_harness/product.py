@@ -8,6 +8,24 @@ from .runtime import redact
 def handle(store,owner,project,request):
     op=request['operation'];scope='@user' if request.get('user_scope') else project
     registry=Components(store,owner,scope)
+    if op.startswith('product-batch-'):
+        from .eval_batch import EvaluationBatch
+        batch=EvaluationBatch(store,owner,project)
+        key=request.get('batch_id')
+        if op=='product-batch-prepare':return batch.prepare(request['workspace'],request['manifest'],request['pi_root'])
+        if op=='product-batch-preview':return batch.preview(key)
+        if op in {'product-batch-report','product-batch-status'}:return batch.report(key)
+        if op=='product-batch-stop':return batch.stop(key)
+        if op=='product-batch-note':return batch.note(key,request['entry_id'],request['arm'],request['kind'],request['text'])
+        if op in {'product-batch-unlock','product-batch-next'}:
+            if request.get('confirmed') is not True:
+                raise ValueError('Explicit phase confirmation required')
+            if op=='product-batch-unlock':return batch.unlock(key,request['packet_hash'])
+            if __import__('os').environ.get('EH_ALLOW_WRITE')!='1':
+                raise ValueError('Restart native with --allow-write for batch execution')
+            import asyncio
+            return asyncio.run(batch.run_next(key,request['packet_hash'],request['pi_root'],request['provider'],request['model']))
+        raise ValueError('Unknown batch evaluation operation')
     if op.startswith('product-eval-'):
         from .task_eval import TaskEvaluation
         evaluation=TaskEvaluation(store,owner,project)

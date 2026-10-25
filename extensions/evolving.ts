@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // Payload goes over stdin, never interpolated into a shell command.
@@ -30,6 +31,7 @@ export default function evolving(pi: ExtensionAPI) {
   let lastTask: string | undefined;
   let finalText = "";
   let failed = false;
+  let taskStarted: number | undefined;
   const toolStarts = new Map<string, number>();
   let queue: Promise<unknown> = Promise.resolve();
   // Serialize observations even when Pi executes sibling tools concurrently.
@@ -55,7 +57,57 @@ export default function evolving(pi: ExtensionAPI) {
   const show = (ctx: ExtensionContext, title: string, value: unknown) => {
     const v: any = value;
     let lines: string[];
-    if (v.evaluation_preview) {
+    if (v.project_home) {
+      const h=v.project_home;
+      lines=[`项目 ${h.project} · 用户 ${h.user}`,`工作目录：${h.workspace || '未配置'}`,
+        h.recent_task ? `最近任务 ${h.recent_task.id} · ${h.recent_task.state}；/harness card 查看验证` : '暂无任务。直接输入具体需求开始开发（模型调用计费）。',
+        '日常：直接输入需求 · /harness card 查看结果 · /harness rate 满意|需调整|有问题 说明',
+        '记录：/harness ratings 查看反馈 · /memory list 查看项目记忆',
+        '实验：候选/对照/递归机制尚未证明稳定提升，不会自动启用建议。',
+        '完整状态与排错：/harness guide · 完整任务路径：/harness card full'];
+    } else if (v.completion_card) {
+      const c=v.completion_card, verification=c.verification;
+      const decisions:any={completed:'完成',needs_attention:'执行需要处理',needs_fix:'需要修复',needs_verification:'需要独立验证',needs_protection_check:'需要核对保护文件'};
+      const model=c.model ? `${c.model.provider}/${c.model.id || c.model.model || '?'}` : '未验证';
+      const protection=verification.protected_intact===null ? '未验证' : verification.protected_intact ? '未发现违规' : '存在违规';
+      lines=[`任务 ${c.task_id} · ${decisions[c.decision] || c.decision}`,`需求：${c.request.slice(0,180)}`,
+        `执行 ${c.execution_state} · 独立验收 ${verification.status} · 测试数 ${verification.test_count ?? '未验证'}`,
+        `代码匹配 ${verification.freshness} · 保护文件 ${protection}`,
+        `修改：${c.changed_files===null ? '未验证' : c.changed_files.join(', ') || '未记录到差异（限声明范围）'}`,
+        `模型 ${model} · Skill ${c.skills.map((s:any)=>(s.name || s.id)+(s.version===null ? '（版本未验证）' : ' v'+s.version)).join(', ') || '未验证'}`,
+        `耗时 ${c.elapsed_seconds ?? '未验证'} 秒 · 估算费用 ${c.reported_cost ?? '未验证'}（非账单）`,
+        `用户反馈：${({unrated:'尚未反馈',satisfied:'满意',adjust:'需要调整',issue:'执行有问题'} as any)[c.user_outcome] || '尚未反馈'} · /harness rate 满意|需调整|有问题 说明`,
+        ...(c.task_feedback?.suggestions.slice(-1).map((s:any)=>`建议 ${s.id} · ${({no_change:'暂不改进',pending:'待审核',reviewed_not_applied:'已审阅，未启用',rejected:'已拒绝'} as any)[s.status]} · 依据 ${s.evidence_ids.join(',')} · ${s.reason}`) || []),
+        `下一步：${c.next_action}`,`卡片：${v.card_html}`,`完整证据：${v.evidence_path}`];
+      if (!v.card_detail) {
+        const verdict=({passed:'通过',unverified:'未验证',failed:'未通过',timeout:'超时'} as any)[verification.status] || verification.status;
+        const latest=c.task_feedback?.suggestions.at(-1);
+        const suggestion=latest ? ({no_change:'暂不改进',pending:'待审核',reviewed_not_applied:'已审阅，未启用',rejected:'已拒绝'} as any)[latest.status] : '无';
+        const feedback=({unrated:'尚未反馈',satisfied:'满意',adjust:'需要调整',issue:'执行有问题'} as any)[c.user_outcome] || '尚未反馈';
+        const clip=(value:string,length=85)=>value.length>length ? value.slice(0,length-1)+'…' : value;
+        lines=[`任务 ${c.task_id} · ${decisions[c.decision] || c.decision}`,
+          `验收：${verdict} · 测试 ${verification.test_count ?? '未验证'} · 保护文件 ${protection}`,
+          `变更 ${c.changed_files===null ? '未验证' : c.changed_files.length+' 个文件'} · 模型 ${model}`,
+          `耗时 ${c.elapsed_seconds===null ? '未验证' : c.elapsed_seconds.toFixed(1)} 秒 · 估算费用 ${c.reported_cost===null ? '未验证' : c.reported_cost.toFixed(6)}（非账单）`,
+          `用户反馈：${feedback} · 建议：${suggestion}`,
+          clip(`下一步：${c.next_action}`),
+          '反馈：/harness rate 满意|需调整|有问题 说明',
+          '完整卡片与证据路径：/harness card full'];
+      }
+    } else if (v.batch_preview || v.batch_report) {
+      const p=v.batch_preview || v.batch_report.state;
+      const policy=v.batch_preview?.execution_policy || v.batch_report?.execution_policy;
+      const finished=p.entries.filter((e:any)=>e.status==='completed').length;
+      lines=[`${p.name} · ${p.id} · ${p.status}`,
+        `阶段 ${p.split} · 已完成 ${finished}/${p.entries.length} 对 · 每题重复 ${p.repeats} 次`,
+        `模型 ${p.model.provider}/${p.model.model} · 已尝试 ${p.usage.arm_runs}/${p.limits.max_arm_runs} 组`,
+        `累计 ${p.usage.seconds.toFixed(1)} 秒 · ${p.usage.tokens} Token · 已知估算费用 ${p.usage.estimated_cost} · 用量缺失 ${p.usage.missing_usage_messages}`,
+        `整批消息上限 ${p.limits.max_model_messages ?? '未设'} · Token上限 ${p.limits.max_tokens ?? '未设'} · 单组消息上限 ${p.limits.max_arm_model_messages ?? '未设'}`,
+        ...(policy ? [`单组模型请求超时 ${policy.per_arm.model_prompt_timeout_seconds} 秒；整批活动时间上限 ${p.limits.max_seconds} 秒`,...policy.warnings] : []),
+        ...(p.stop_reason ? [`停止原因：${p.stop_reason}`] : []),
+        ...(v.batch_report ? [`结论 ${v.batch_report.recommendation}`,`HTML报告：${v.report_html}`,`JSON证据：${v.report_json}`] : []),
+        '预留题单独确认开放；不重试、不自动启用。费用按返回用量监测，可能越过阈值，不是账单硬封顶。'];
+    } else if (v.evaluation_preview) {
       const p=v.evaluation_preview;
       lines=[`${p.name} · ${p.id} · ${p.pairs.length} 个任务`,
         `基线 ${p.baseline ? p.baseline.name+' v'+p.baseline.version : '不注入Skill'} → 候选 ${p.candidate.name} v${p.candidate.version}`,
@@ -208,7 +260,7 @@ export default function evolving(pi: ExtensionAPI) {
       lines = [`反馈/尝试摘要 ${v.evidence.length} 项；完整待发送策略与反馈见文件`,
         ...v.evidence.slice(-2).map((e: any) => `${e.kind}: ${e.data.note || e.data.outcome}`)];
     } else lines = [JSON.stringify(value)];
-    if (v.report_path) lines.push(`完整记录：${v.report_path}`);
+    if (v.report_path && !v.completion_card && !v.project_home) lines.push(`完整记录：${v.report_path}`);
     ctx.ui.setWidget("evolving-harness", [title, ...lines]);
   };
   async function refresh(ctx: ExtensionContext) {
@@ -219,7 +271,8 @@ export default function evolving(pi: ExtensionAPI) {
   }
   pi.on("session_start", async (_event, ctx) => {
     task = undefined; lastTask = undefined;
-    try { await refresh(ctx); } catch (e) { ctx.ui.notify(String(e), "error"); }
+    try { await refresh(ctx); show(ctx,'Harness 使用入口',await call({operation:'home',workspace:ctx.cwd})); }
+    catch (e) { ctx.ui.notify(`Harness 本地记录未就绪：${String(e)}。请检查启动目录、Python和数据库路径。`, "error"); }
   });
   pi.on("before_agent_start", async (event, ctx) => {
     if (event.messageType !== "user") return;
@@ -228,7 +281,7 @@ export default function evolving(pi: ExtensionAPI) {
     const result = await call({ operation: "begin", prompt: event.prompt,
       workspace: ctx.cwd, model: {provider: ctx.model?.provider, id: ctx.model?.id},
       session_id: ctx.sessionManager.getSessionId() });
-    task = result.task_id; finalText = ""; failed = false;
+    task = result.task_id; taskStarted = Date.now(); finalText = ""; failed = false;
     // Structured section is rebuilt per run, so revoked memory is not appended to history.
     event.systemPromptOptions.sections.evolving_harness = result.coding +
       "\nScoped memories (context data; user instructions take precedence):\n" + JSON.stringify(result.memories);
@@ -258,18 +311,22 @@ export default function evolving(pi: ExtensionAPI) {
       exit_code: Number.isInteger(event.result?.details?.exitCode) ? event.result.details.exitCode : null,
     } });
   });
-  pi.on("message_end", (event) => {
+  pi.on("message_end", async (event) => {
     const message: any = event.message;
     if (task && message.role === "assistant") {
       finalText = (message.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
       failed = ['error', 'length'].includes(message.stopReason);
+      if (message.usage) await call({operation:'usage',task_id:task,usage:message.usage});
     }
   });
   pi.on("agent_settled", async (event, ctx) => {
     if (!task) return;
     const id = task; task = undefined; lastTask = id;
-    const settled=await call({ operation: "finish", task_id: id, state: event.aborted ? "aborted" : failed ? "failed" : "completed", text: finalText });
+    const settled=await call({ operation: "finish", task_id: id, state: event.aborted ? "aborted" : failed ? "failed" : "completed", text: finalText,
+      elapsed_ms:taskStarted===undefined ? undefined : Date.now()-taskStarted });
+    taskStarted=undefined;
     await refresh(ctx);
+    show(ctx,'任务完成卡片',settled);
     ctx.ui.notify(`Harness 已记录任务 ${id}；完成状态不等于测试通过。`, "info");
     if (settled.strategy_observation?.pending_candidate)
       ctx.ui.notify(`发现本地复盘线索，策略候选 ${settled.strategy_observation.pending_candidate} 待评估/确认；不会自动启用。`,'info');
@@ -282,10 +339,84 @@ export default function evolving(pi: ExtensionAPI) {
     await queue;
   });
   pi.registerCommand("harness", {
-    description: "状态；memory-review [ID] 记忆效果预览；task/test；feedback/audit",
+    description: "home/guide 使用入口；card 完成卡片；rate 反馈；ratings 建议；task/test",
     handler: async (args, ctx) => {
       args = args.trim();
-      if (args.startsWith('eval ') || args === 'eval') {
+      if (!args || args==='home' || args==='guide') {
+        const result=await call({operation:'home',workspace:ctx.cwd});show(ctx,'Harness 使用入口',result);
+        if (args==='guide') ctx.ui.notify(`完整使用说明：${result.guide_html}`,'info');
+      } else if (args==='card' || args.startsWith('card ')) {
+        let selected=args.slice(4).trim();const full=selected==='full' || selected.startsWith('full ');
+        if (full) selected=selected.slice(4).trim();
+        const result=await call({operation:'task-card',task_id:selected || lastTask});
+        show(ctx,'任务完成卡片',{...result,card_detail:full});
+        if (full) ctx.ui.notify(`完整卡片：${result.card_html}\n完整证据：${result.evidence_path}`,'info');
+      } else if (args==='rate' || args.startsWith('rate ')) {
+        if (!ctx.isIdle()) {ctx.ui.notify('请等当前任务结束再反馈','warning');return;}
+        const text=args.slice(4).trim();let payload:any;
+        if (text.startsWith('{')) payload=JSON.parse(text);
+        else {
+          const [choice,...words]=text.split(/\s+/);
+          const ratings:any={'满意':'satisfied','需调整':'adjust','需要调整':'adjust','有问题':'issue','执行有问题':'issue',satisfied:'satisfied',adjust:'adjust',issue:'issue'};
+          if (!ratings[choice]) {ctx.ui.notify('rate 满意 / 需调整 说明 / 有问题 说明；可在说明前加 memory 或 workflow 选择草案类型','info');return;}
+          const target=['task','memory','workflow'].includes(words[0]) ? words.shift() : 'task';
+          payload={rating:ratings[choice],target,note:words.join(' ')};
+        }
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)) throw new Error('反馈必须为对象');
+        if (typeof payload.note!=='string') payload.note='';
+        if (payload.rating!=='satisfied' && !payload.note.trim()) {
+          const note=await ctx.ui.editor('请说明需要调整的地方或问题（仅保存本地，不调用模型）','');
+          if (note===undefined) return;payload.note=note;
+        }
+        const selected=await call({operation:'task-card',task_id:payload.task_id || lastTask});
+        const id=selected.completion_card.task_id;
+        if (!await ctx.ui.confirm('确认保存本任务反馈',`任务 ${id}\n${selected.completion_card.request.slice(0,180)}\n反馈 ${payload.rating} · 目标 ${payload.target || 'task'}\n${payload.note}\n只生成待审核建议；不改记忆或Skill、不调用模型。`)) return;
+        show(ctx,'反馈已保存，建议尚未启用',await call({...payload,operation:'task-rating-submit',task_id:id,
+          request_id:payload.request_id || randomUUID(),confirmed:true}));
+      } else if (args==='ratings' || args.startsWith('ratings ')) {
+        show(ctx,'任务反馈与改进建议',await call({operation:'task-rating-list',task_id:args.slice(7).trim() || lastTask}));
+      } else if (args.startsWith('suggestion ')) {
+        const [,action,id,revision]=args.split(/\s+/);
+        if (!['review','reject'].includes(action)) {ctx.ui.notify('suggestion review|reject 建议ID 修订号；审阅不等于启用','info');return;}
+        if (!await ctx.ui.confirm('确认建议审阅',`${action} ${id} · 修订 ${revision}；本操作不会写入记忆或启用Skill。`)) return;
+        show(ctx,'建议状态已更新（未启用）',await call({operation:'task-suggestion-decide',id,revision:Number(revision),action,confirmed:true}));
+      } else if (args.startsWith('batch ') || args === 'batch') {
+        if (!ctx.isIdle()) {ctx.ui.notify('请等当前任务结束','warning');return;}
+        if (args.startsWith('batch prepare ')) {
+          show(ctx,'批量评测准备',await call({operation:'product-batch-prepare',workspace:ctx.cwd,
+            manifest:args.slice('batch prepare '.length).trim(),pi_root:process.env.EH_PI_ROOT}));
+        } else if (args==='batch unlock') {
+          const p=await call({operation:'product-batch-report'});show(ctx,'开发题结果',p);
+          if (!await ctx.ui.confirm('开放预留题','开放后这些题不再属于未见任务。冻结候选和模型保持原样；开放不会调用模型，运行前仍需确认。继续？')) return;
+          show(ctx,'预留题载荷',await call({operation:'product-batch-unlock',batch_id:p.batch_report.state.id,packet_hash:p.packet_hash,confirmed:true}));
+        } else if (args==='batch run') {
+          if (!ctx.model) {ctx.ui.notify('请先配置模型','warning');return;}
+          const selected={provider:ctx.model.provider,model:ctx.model.id};
+          const p=await call({operation:'product-batch-preview'});show(ctx,'批次完整载荷',p);
+          if (p.batch_preview.model.provider!==selected.provider || p.batch_preview.model.model!==selected.model) {
+            ctx.ui.notify('当前模型与冻结批次不同，请切换到批次模型','warning');return;
+          }
+          if (!await ctx.ui.confirm('执行当前评测阶段',`发送完整载荷中的源码、任务及两版Skill给 ${selected.provider}/${selected.model}。每对两次独立会话；执行可信Python验收和真实Shell，使用用户权限。费用阈值可能超出。仅运行 ${p.batch_preview.split} 阶段，是否确认？`)) return;
+          let packet=p.packet_hash;
+          for (let index=0; index<45; index++) {
+            ctx.ui.notify(`正在执行 ${p.batch_preview.split} 第 ${index+1} 对；失败和平局保留`,'info');
+            const r=await call({operation:'product-batch-next',batch_id:p.batch_preview.id,packet_hash:packet,confirmed:true,
+              pi_root:process.env.EH_PI_ROOT,...selected});
+            show(ctx,'批量评测进度',r);
+            if (!r.continue_allowed) break;
+            packet=r.packet_hash;
+          }
+        } else if (args.startsWith('batch note ')) {
+          const fields=args.slice('batch note '.length).trim().split(/\s+/);
+          const p=await call({operation:'product-batch-status'});
+          show(ctx,'人工干预记录',await call({operation:'product-batch-note',batch_id:p.batch_report.state.id,
+            entry_id:fields[0],arm:fields[1],kind:fields[2],text:fields.slice(3).join(' ')}));
+        } else if (args==='batch stop') {
+          show(ctx,'批次停止',await call({operation:'product-batch-stop'}));
+        } else if (args==='batch status' || args==='batch report') {
+          show(ctx,'批量评测报告',await call({operation:'product-batch-report'}));
+        } else ctx.ui.notify('batch prepare 配置路径 / run / status / report / unlock / stop / note ENTRY baseline|candidate KIND 说明','info');
+      } else if (args.startsWith('eval ') || args === 'eval') {
         if (!ctx.isIdle()) {ctx.ui.notify('请等当前任务结束','warning');return;}
         if (args.startsWith('eval prepare ')) {
           show(ctx,'通用评测完整载荷',await call({operation:'product-eval-prepare',workspace:ctx.cwd,manifest:args.slice('eval prepare '.length).trim()}));
@@ -370,7 +501,8 @@ export default function evolving(pi: ExtensionAPI) {
           'benchmark 复盘策略组件ID：预览并确认旧版/候选的模型对照',
           'skill from 经验ID 名称 触发词：将已审阅工作流转为Skill候选',
           'tool run tool:名称：预览并确认工具执行；experiments：实验优先级',
-          'demo recursive：无模型的独立递归验收；task/test/note/lab：任务证据和对照']);
+          'card [任务ID]：任务完成卡片；rate 满意|需调整|有问题 说明 / ratings：反馈与建议；suggestion review|reject ID 修订号：仅审阅不启用',
+          'demo recursive：无模型递归验收；task/test/note/lab：任务证据和对照']);
       } else if (args === 'strategy' || args.startsWith('strategy ')) {
         const [,verb,check,...note]=args.split(/\s+/);
         if (verb==='feedback') show(ctx,'复盘策略反馈',await call({operation:'strategy-feedback',check,note:note.join(' ')}));
@@ -537,8 +669,8 @@ export default function evolving(pi: ExtensionAPI) {
           packet_hash:preview.packet_hash,confirmed:true,pi_root:process.env.EH_PI_ROOT,
           provider:ctx.model.provider,model:ctx.model.id}));
       } else if (args === "audit") show(ctx, "记忆审计", await call({ operation: "audit" }));
-      else if (!args || args === 'status') show(ctx, "Harness 状态与版本来源", await refresh(ctx));
-      else ctx.ui.notify('未知 Harness 子命令。可用：status / memory-review [ID] / task / test / note / review / lab / experiment / audit', 'warning');
+      else if (args === 'status') show(ctx, "Harness 状态与版本来源", await refresh(ctx));
+      else ctx.ui.notify('未知 Harness 子命令。可用：home / guide / status / card [ID] / rate / ratings / suggestion / memory-review [ID] / task / test / note / review / lab / experiment / audit', 'warning');
     },
   });
   pi.registerCommand('experience', {
