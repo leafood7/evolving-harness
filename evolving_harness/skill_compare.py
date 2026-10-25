@@ -88,7 +88,9 @@ def compare(results):
     if set(results)!={'without_skill','with_skill'} or any(r['status']!='completed' for r in results.values()):
         return {'outcome':'inconclusive'}
     a,b=results['without_skill'],results['with_skill']
-    if any(not r['reference'].get('protected_intact',True) or r['reference']['status'] in {'timeout','protected_changed'} for r in (a,b)):
+    if any(not r['reference'].get('protected_intact',True) or not r['reference'].get('integrity_ok',True)
+           or not r['reference'].get('snapshot_stable',True)
+           or r['reference']['status'] in {'timeout','protected_changed','workspace_invalid'} for r in (a,b)):
         return {'outcome':'inconclusive','reason':'Invalid independent evaluation'}
     x,y=(r['reference']['status']=='passed' for r in (a,b))
     outcome='improved_on_this_task' if y and not x else 'worse_on_this_task' if x and not y else 'tie_on_this_task' if x and y else 'both_failed'

@@ -118,23 +118,44 @@ def validate(config):
     return config
 
 
-def intact(root, state):
-    try:
-        # Inspect all descendants, including newly introduced links before checks.
-        collect(root, state.get('excluded', []))
-        for name in state['protected']:
+def integrity(root, state):
+    """Explain failed integrity checks without including source or changing it."""
+    violations = []
+    for name in state['protected']:
+        try:
             p = inside(root, name)
-            if p.read_text(encoding='utf-8') != state['files'][name]:
-                return False
-        return True
-    except (ValueError, OSError, UnicodeError):
-        return False
+            if not p.is_file():
+                violations.append({'path': name, 'reason': 'missing', 'protected': True})
+            elif p.stat().st_size > 128000:
+                violations.append({'path': name, 'reason': 'oversized', 'protected': True})
+            else:
+                text = p.read_text(encoding='utf-8')
+                if text != state['files'][name]:
+                    violations.append({'path': name, 'reason': 'changed', 'protected': True,
+                                       'expected_hash': digest(state['files'][name]), 'actual_hash': digest(text)})
+        except (ValueError, OSError, UnicodeError) as exc:
+            violations.append({'path': name, 'reason': 'unreadable_or_unsafe', 'protected': True,
+                               'detail': redact(str(exc))[:1000]})
+    try:
+        # Also reject new links and source-limit violations; don't mislabel them
+        # as modifications to an otherwise unchanged protected file.
+        collect(root, state.get('excluded', []))
+    except (ValueError, OSError, UnicodeError) as exc:
+        violations.append({'path': '.', 'reason': 'workspace_invalid', 'protected': False,
+                           'detail': redact(str(exc))[:1000]})
+    return {'integrity_ok': not violations,
+            'protected_intact': not any(v['protected'] for v in violations), 'violations': violations}
+
+
+def intact(root, state):
+    return integrity(root, state)['integrity_ok']
 
 
 def reference(root, state):
     root = Path(root)
-    if not intact(root, state):
-        return {'status': 'protected_changed', 'protected_intact': False}
+    initial = integrity(root, state)
+    if not initial['integrity_ok']:
+        return {'status': 'protected_changed' if not initial['protected_intact'] else 'workspace_invalid', **initial}
     before = snapshot(str(root)); outputs = []; valid = True; counts = []
     env = os.environ.copy(); env.pop('PYTHONPATH', None); env['PYTHONUTF8'] = '1'
     for check in state['checks']:
@@ -146,7 +167,7 @@ def reference(root, state):
                     child.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     child.kill(); child.wait()
-                    return {'status': 'timeout', 'checks': outputs, 'protected_intact': intact(root, state)}
+                    return {'status': 'timeout', 'checks': outputs, **integrity(root, state)}
                 capture.seek(0); output = capture.read(24000).decode('utf-8', errors='replace')
             match = re.search(r'Ran (\d+) tests?\b', output)
             count = int(match[1]) if match else 0
@@ -156,11 +177,13 @@ def reference(root, state):
             counts.append(count); valid = valid and passed
         except OSError as exc:
             return {'status': 'failed', 'error': redact(str(exc)), 'checks': outputs}
-    protected = intact(root, state)
+    final = integrity(root, state)
     stable = before['manifest_hash'] == snapshot(str(root))['manifest_hash']
-    return {'status': 'passed' if valid and protected and stable else 'failed',
+    status = ('protected_changed' if not final['protected_intact'] else 'workspace_invalid'
+              if not final['integrity_ok'] else 'passed' if valid and stable else 'failed')
+    return {'status': status,
             'checks': outputs, 'test_count': max(counts, default=0),
-            'protected_intact': protected, 'snapshot_stable': stable}
+            **final, 'snapshot_stable': stable}
 
 
 def assert_promotion_allowed(store, owner, project, candidate_id):
@@ -259,6 +282,7 @@ class TaskEvaluation:
                                        owner=self.owner, project=self.project, query=case['prompt'])
             memories = budget_memories(memories, context)
             constraints = '\nModify only this workspace copy. Do not change these existing protected files: ' + ', '.join(protected)
+            constraints += '\nAll existing tests/ files are read-only: do not edit, append tests to, rename or delete them. Add regression tests only in NEW files, e.g. tests/test_task_' + case['id'] + '.py. Adding assertions to an existing protected test file is also forbidden.'
             constraints += '\nDo not install dependencies, access the network or read other directories. Run project tests and report actual results.'
             state = {'id': pair_id, 'suite_id': suite_id, 'case_id': case['id'], 'status': 'ready',
                      'source': str(source), 'source_hash': digest(files), 'files': files,
@@ -347,10 +371,12 @@ class TaskEvaluation:
                       str(values['known_reported_cost']) + ' / ' + str(values['missing_cost_runs'])]
             body += '<tr>' + ''.join('<td>' + html.escape(str(value)) + '</td>' for value in fields) + '</tr>'
         body += '</table><h2>逐任务结果</h2>'
-        body += '<p>' + html.escape(suite['notice']) + '</p><table><tr><th>Case</th><th>Outcome</th><th>Baseline / candidate checks</th></tr>'
+        body += '<p>' + html.escape(suite['notice']) + '</p><table><tr><th>Case</th><th>Outcome</th><th>Baseline / candidate checks</th><th>违规文件或完整性问题</th></tr>'
         for row in rows:
             checks = ' / '.join(row['arms'].get(a, {}).get('reference', {}).get('status', 'pending') for a in ('baseline', 'candidate'))
-            body += '<tr>' + ''.join('<td>' + html.escape(str(x)) + '</td>' for x in (row['case_id'], row['outcome'], checks)) + '</tr>'
+            reasons = '; '.join(arm + ': ' + v['path'] + ' (' + v['reason'] + ')'
+                                for arm, result in row['arms'].items() for v in result['reference'].get('violations', []))
+            body += '<tr>' + ''.join('<td>' + html.escape(str(x)) + '</td>' for x in (row['case_id'], row['outcome'], checks, reasons or '—')) + '</tr>'
         body += '</table><details><summary>Evidence and metrics</summary><pre>' + html.escape(json.dumps(report, ensure_ascii=False, indent=2)) + '</pre></details></html>'
         (directory / 'report.html').write_text(body, encoding='utf-8')
         return {'evaluation_report': report, 'report_json': str(directory / 'report.json'), 'report_html': str(directory / 'report.html')}

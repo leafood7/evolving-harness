@@ -10,7 +10,8 @@ from unittest.mock import patch
 from evolving_harness.components import Components
 from evolving_harness.native import dispatch
 from evolving_harness.store import Store
-from evolving_harness.task_eval import TaskEvaluation, TaskPair, reference, validate
+from evolving_harness.task_eval import TaskEvaluation, TaskPair, reference, validate, integrity
+from evolving_harness.skill_compare import compare
 
 
 class Actor:
@@ -165,6 +166,48 @@ class EvaluationTests(unittest.TestCase):
         self.assertNotIn('suite.json', state['files'])
         self.assertFalse(Path(state['arms']['with_skill']['workspace'], 'suite.json').exists())
         self.assertEqual(TaskPair(self.s, 'alice', 'p', state['id']).collect(state['source']), state['files'])
+
+    def test_new_test_file_is_allowed_but_append_to_existing_test_is_explained(self):
+        state = self.eval.prepare(self.root, 'suite.json')['evaluation_preview']['pairs'][0]['evaluation_pair_preview']
+        self.assertIn('Add regression tests only in NEW files', state['task'])
+        self.assertIn('append tests to', state['task'])
+        root = Path(state['arms']['with_skill']['workspace'])
+        (root / 'tests/test_new.py').write_text('import unittest\nclass New(unittest.TestCase):\n def test_new(self):self.assertTrue(True)\n')
+        self.assertTrue(integrity(root, state)['integrity_ok'])
+        target = root / 'tests/test_app.py'
+        target.write_text(target.read_text() + '\n# additional assertion would still violate the file protection\n')
+        with patch('evolving_harness.task_eval.subprocess.Popen') as child:
+            result = reference(root, state)
+        child.assert_not_called()
+        self.assertEqual(result['status'], 'protected_changed')
+        issue = next(v for v in result['violations'] if v['path'] == 'tests/test_app.py')
+        self.assertEqual(issue['reason'], 'changed')
+        self.assertNotEqual(issue['actual_hash'], issue['expected_hash'])
+        self.assertNotIn('test_baseline', json.dumps(issue))
+
+    def test_missing_protected_file_and_workspace_limit_have_distinct_diagnostics(self):
+        state = self.eval.prepare(self.root, 'suite.json')['evaluation_preview']['pairs'][0]['evaluation_pair_preview']
+        root = Path(state['arms']['with_skill']['workspace']); protected = root / 'AGENTS.md'
+        original = protected.read_text(); protected.unlink()
+        result = reference(root, state)
+        self.assertIn({'path': 'AGENTS.md', 'reason': 'missing', 'protected': True}, result['violations'])
+        protected.write_text(original)
+        (root / 'oversized.txt').write_text('x' * 128001)
+        result = reference(root, state)
+        self.assertEqual(result['status'], 'workspace_invalid')
+        self.assertTrue(result['protected_intact']); self.assertFalse(result['integrity_ok'])
+        arm = {'status': 'completed', 'reference': result, 'metrics': {'isolated_check_observed': False}}
+        self.assertEqual(compare({'without_skill': arm, 'with_skill': arm})['outcome'], 'inconclusive')
+
+    def test_checker_side_effect_on_protected_file_is_reported_after_execution(self):
+        state = self.eval.prepare(self.root, 'suite.json')['evaluation_preview']['pairs'][0]['evaluation_pair_preview']
+        root = Path(state['arms']['with_skill']['workspace'])
+        state['checks'] = [{'name': 'invalid-checker-fixture', 'args': ['-c',
+            "from pathlib import Path; Path('AGENTS.md').write_text('changed'); print('Ran 1 test\\nOK')"], 'require_tests': True}]
+        result = reference(root, state)
+        self.assertEqual(result['status'], 'protected_changed')
+        self.assertFalse(result['snapshot_stable'])
+        self.assertEqual(result['violations'][0]['path'], 'AGENTS.md')
 
 
 if __name__ == '__main__': unittest.main()

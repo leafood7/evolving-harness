@@ -67,6 +67,8 @@ export default function evolving(pi: ExtensionAPI) {
       const outcomes:any={ready:'待运行',running:'运行中',tie_on_this_task:'本任务持平',improved_on_this_task:'本任务改善',worse_on_this_task:'本任务退步',both_failed:'两组未通过',inconclusive:'无结论'};
       lines=[`${p.name} · ${p.complete ? '已结束' : '未全部结束'} · ${decisions[p.recommendation] || p.recommendation}`,
         ...p.cases.map((c:any)=>`${c.case_id}: ${outcomes[c.outcome] || c.outcome} · 基线 ${c.arms.baseline?.reference.status || '未运行'} / 候选 ${c.arms.candidate?.reference.status || '未运行'}`),
+        ...p.cases.flatMap((c:any)=>Object.entries(c.arms).flatMap(([arm,r]:[string,any])=>
+          (r.reference.violations || []).map((v:any)=>`${c.case_id} · ${arm==='baseline' ? '基线' : '候选'}：${v.path} · ${v.reason}${v.detail ? ' · '+v.detail : ''}`))),
         `HTML报告：${v.report_html}`,`JSON证据：${v.report_json}`,
         '失败和平局保留；不自动重试、不自动启用，小样本不证明泛化收益。'];
     } else if (v.skill_comparison_preview) {
